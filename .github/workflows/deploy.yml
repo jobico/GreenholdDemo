@@ -1,0 +1,67 @@
+# Checks the demo site and publishes it to GitHub Pages (demo.greenhold.eu, CH-1575).
+# The site is made on the build computer from Mock Testing (BL-696) and committed in site/.
+# Pull requests check only; a push to main deploys.
+name: Check and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the site
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          test -f site/index.html || { echo "site/index.html is missing."; fail=1; }
+          test "$(cat site/CNAME 2>/dev/null)" = "demo.greenhold.eu" || { echo "site/CNAME must say demo.greenhold.eu."; fail=1; }
+          # Nothing is loaded from another site: no scripts, images, styles or fonts from elsewhere.
+          # A link a visitor follows (<a href="https://docs.greenhold.eu/...">) is allowed.
+          if grep -rEnI --include='*.html' 'src="https?://|<link[^>]*href="https?://' site; then
+            echo "A page loads something from another site."; fail=1
+          fi
+          if grep -rEnI --include='*.css' '@import[^;]*https?://|url\(["'"'"']?https?://' site; then
+            echo "A stylesheet loads something from another site."; fail=1
+          fi
+          # Every local link points at a file in the site (links with a scheme, such as https: or mailto:, are not local).
+          while IFS= read -r line; do
+            file="${line%%:*}"; target="${line#*:}"
+            target="${target%%#*}"; target="${target%%\?*}"
+            [ -z "$target" ] && continue
+            case "$target" in /*) path="site$target" ;; *) path="$(dirname "$file")/$target" ;; esac
+            [ -d "$path" ] && path="$path/index.html"
+            [ -e "$path" ] || { echo "$file links to $target, which is not in the site."; fail=1; }
+          done < <(grep -roEI --include='*.html' 'href="[^"#:][^":]*"' site | sed -E 's/:href="([^"]*)"$/:\1/')
+          exit $fail
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
